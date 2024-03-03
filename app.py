@@ -1,13 +1,15 @@
 import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
+import fitz
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import faiss, chroma, tair
 import getpass
 import os
 from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
+from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, ServiceContext, Document
+from llama_index.llms.openai import OpenAI
 from llama_index.vector_stores.chroma import ChromaVectorStore
 import openai
 import chromadb
@@ -20,7 +22,26 @@ from htmlTemplates import css, bot_template, user_template
 
 
 
-file_path = file_path = os.path.join("data", "docs.txt")
+file_path = os.path.join("data", "docs.txt")
+folder_path = os.path.join("data")
+
+def pdf_to_text(pdf_content, folder_path):
+    # Ensure the folder exists
+    os.makedirs(folder_path, exist_ok=True)
+    for pdf in pdf_content:
+    # Extract text from the PDF content
+        pdf_reader = PdfReader(pdf)
+        text = ""
+        for page_num in range(len(pdf_reader.pages)):
+            text += pdf_reader.pages[page_num].extract_text()
+
+        # Create a text file name based on a default name (you can customize this logic)
+        text_file_name = "output.txt"
+
+        # Save the text to the text file in the provided folder path
+        text_file_path = os.path.join(folder_path, text_file_name)
+        with open(text_file_path, 'w', encoding='utf-8') as text_file:
+            text_file.write(text)
 
 
 def get_pdf_text(pdf_docs):
@@ -42,67 +63,43 @@ def get_text_chunks(text):
     chunks = text_splitter.split_text(text) #it is in a list format 
     return chunks
 
-def write_to_txt_file(text_chunks, path):
-    # Check if the file exists
-    if os.path.exists(path):
-        mode = 'a'  # Append mode
-    else:
-        mode = 'w'  # Create and write mode
-
-    with open(path, mode, encoding='utf-8') as file:
-        for chunk in text_chunks:
-            file.write(chunk + '\n')
 
 
-def get_vectorstore(text_chunks):
-    write_to_txt_file(text_chunks, file_path)
+@st.cache_resource(show_spinner=False)
+def load_data():
+    with st.spinner(text="Loading and indexing the Streamlit docs – hang tight! This should take 1-2 minutes."):
+        reader = SimpleDirectoryReader(input_dir="./data", recursive=True)
+        docs = reader.load_data()
+        service_context = ServiceContext.from_defaults(llm=OpenAI(model="gpt-3.5-turbo", temperature=0.5, system_prompt="You are an expert on the Streamlit Python library and your job is to answer technical questions. Assume that all questions are related to the documents processed or provided to the streamlit input. Keep your answers technical and based on facts – do not hallucinate features."))
+        index = VectorStoreIndex.from_documents(docs, service_context=service_context)
+        return index
 
+
+def chat(index, query):
     
-    chroma_client = chromadb.EphemeralClient()
+    chat_engine = index.as_chat_engine(chat_mode="condense_question", verbose=True)
+    response = chat_engine.chat(query)
+    return response
 
-    if "quickstart" in chroma_client.list_collections():
-        chroma_client.delete_collection("quickstart")
 
-    # Create a new collection
+   
 
-    chroma_collection = chroma_client.create_collection("quickstart")
-    embeddings = OpenAIEmbeddings()
 
-    vectorstore = ChromaVectorStore(chroma_collection=chroma_collection)
-    storage_context = StorageContext.from_defaults(vector_store=vectorstore)
-    documents = SimpleDirectoryReader("./data/").load_data()
-    # Create the VectorStoreIndex with documents
-    index = VectorStoreIndex.from_documents(documents, embed_model=embeddings, storage_context=storage_context)
-
-    return index
-
-def get_conversatoin_chain(vectorstore):
-    llm =  ChatOpenAI()
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    conversation_chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        
-        #retriever=vectorstore.as_retriever(),
-        retriever=vectorstore.as_retriever(),
-        memory=memory
-
-    )
-    return conversation_chain
-
-def handle_userinput(user_question):
-    response = st.session_state.conversation({'question': user_question})
-    st.write(response)
+#"""def handle_userinput(user_question):
+ #   response = st.session_state.conversation({'question': user_question})
+  #  st.write(response)"""
 
 
 
 def main():
-    load_dotenv()
-    api_key = os.getenv("OPENAI_API_KEY")
-    os.environ["OPENAI_API_KEY"] = api_key
+    
     st.set_page_config(page_title="Chat with your PDFs",
                         page_icon=":books:")
     
     st.write(css, unsafe_allow_html=True)
+    load_dotenv()
+    api_key = os.getenv("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = api_key
 
     
     if "conversation" not in st.session_state:
@@ -110,10 +107,11 @@ def main():
 
 
     st.header("Chat with your PDFs :books:")
+    if "messages" not in st.session_state.keys(): # Initialize the chat message history
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Ask me a question about Streamlit's open-source Python library!"}
+    ]
     user_question = st.text_input("Ask a question about your documents: ")
-    if user_question:
-        handle_userinput(user_question)
-
 
     st.write(user_template.replace("{{MSG}}", "Hello Alferd"), unsafe_allow_html=True)
     st.write(bot_template.replace("{{MSG}}", "Hello Master"), unsafe_allow_html=True)
@@ -127,21 +125,43 @@ def main():
         if st.button("Process"):
             with st.spinner("Processing"): #adding this for form user friendly (to show the programme is actually running)
                 #we need to get the PDFs first
-                raw_text = get_pdf_text(pdf_docs)
+                #raw_text = get_pdf_text(pdf_docs)
             
                 #getting the text chunks (converted)
-                texts_chunks = get_text_chunks(raw_text)
+                pdf_to_text(pdf_docs, folder_path)
 
                 
                 #creating vector store
-                vectorstore = get_vectorstore(texts_chunks)
-
-                #creating conversation chain
-                st.session_state.conversation = get_conversatoin_chain(vectorstore) #session state helps for the vaiable to not get reinitialised
+                vectorstore = load_data()
 
 
+    if user_question:
+        query = user_question
+        vectorstore = load_data()
 
 
+
+    #creating conversation chain
+    #st.session_state.conversation = chat(vectorstore, query) #session state helps for the vaiable to not get reinitialised
+        st.session_state.messages.append({"role": "user", "content": query})
+        for message in st.session_state.messages: # Display the prior chat messages
+                with st.chat_message(message["role"]):
+                    st.write(message["content"])
+
+
+
+        
+        if st.session_state.messages[-1]["role"] != "assistant":
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    response = chat(vectorstore, query)
+
+                    
+                    message = {"role": "assistant", "content": response.response}
+                    st.session_state.messages.append(message) # Add response to message history
+
+                    st.write(user_template.replace("{{MSG}}", query), unsafe_allow_html=True)   
+                    st.write(bot_template.replace("{{MSG}}", response.response), unsafe_allow_html=True)
 
 
 
