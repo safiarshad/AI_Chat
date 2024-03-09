@@ -110,14 +110,6 @@ def handle_userinput(user_question):
 
 
 
-   
-
-
-#"""def handle_userinput(user_question):
- #   response = st.session_state.conversation({'question': user_question})
-  #  st.write(response)"""
-
-
 
 def main():
     
